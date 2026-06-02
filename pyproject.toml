@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "factorresearch"
+version = "0.1.0"
+description = "因子研究工具包"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.10.9",
+    "polars>=1.40.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["factorresearch", "research", "plotting"]
