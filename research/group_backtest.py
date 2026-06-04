@@ -37,6 +37,7 @@ def _assign_factor_groups(
             .alias("group"),
         )
         .with_columns(pl.col("group").cast(pl.Utf8).cast(pl.Int64))
+        .filter(pl.col("group").is_not_null())
     )
 
 
@@ -79,7 +80,8 @@ def _group_performance(
     trading_days: int = _TRADING_DAYS,
 ) -> pl.DataFrame:
     rows: list[dict[str, float | int]] = []
-    for g in sorted(daily["group"].unique().to_list()):
+    groups = [g for g in daily["group"].unique().to_list() if g is not None]
+    for g in sorted(groups):
         s = daily.filter(pl.col("group") == g).sort(date_col)
         rets = s["daily_ret"]
         n = rets.len()
