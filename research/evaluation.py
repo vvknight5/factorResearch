@@ -1,10 +1,30 @@
 import math
+from typing import Literal
 
 import polars as pl
 
 from research.utils import resolve_factor_name
 
+Period = Literal["year", "month"]
 _REQUIRED_COLS = ("factor", "ret", "trade_date", "stock_code")
+
+
+def _daily_ic_df(
+    df: pl.DataFrame,
+    factor_col: str,
+    ret_col: str,
+    date_col: str,
+    method: str,
+) -> pl.DataFrame:
+    return (
+        df.filter(
+            pl.col(factor_col).is_not_null(),
+            pl.col(ret_col).is_not_null(),
+        )
+        .group_by(date_col)
+        .agg(pl.corr(factor_col, ret_col, method=method).alias("ic"))
+        .filter(pl.col("ic").is_finite())
+    )
 
 
 def _daily_ic(
@@ -14,16 +34,7 @@ def _daily_ic(
     date_col: str,
     method: str,
 ) -> pl.Series:
-    return (
-        df.filter(
-            pl.col(factor_col).is_not_null(),
-            pl.col(ret_col).is_not_null(),
-        )
-        .group_by(date_col)
-        .agg(pl.corr(factor_col, ret_col, method=method).alias("ic"))
-        .filter(pl.col("ic").is_finite())
-        .get_column("ic")
-    )
+    return _daily_ic_df(df, factor_col, ret_col, date_col, method).get_column("ic")
 
 
 def _ic_stats(ic: pl.Series) -> dict[str, float]:
@@ -73,6 +84,45 @@ def _ic_stats(ic: pl.Series) -> dict[str, float]:
     }
 
 
+def _period_expr(date_col: str, period: Period) -> pl.Expr:
+    if period == "year":
+        return pl.col(date_col).dt.year().alias("period")
+    return pl.col(date_col).dt.strftime("%Y-%m").alias("period")
+
+
+def _summarize_ic_period(group: pl.DataFrame) -> pl.DataFrame:
+    ic_s = _ic_stats(group.get_column("ic"))
+    rank_s = _ic_stats(group.get_column("rank_ic"))
+    return pl.DataFrame(
+        {
+            "period": [group.get_column("period")[0]],
+            "factor_name": [group.get_column("factor_name")[0]],
+            "ic_mean": [ic_s["mean"]],
+            "ic_std": [ic_s["std"]],
+            "ic_max": [ic_s["max"]],
+            "ic_min": [ic_s["min"]],
+            "ic_t_stat": [ic_s["t_stat"]],
+            "icir": [ic_s["ir"]],
+            "rank_ic_mean": [rank_s["mean"]],
+            "rank_ic_t_stat": [rank_s["t_stat"]],
+        }
+    )
+
+
+def _daily_ic_panel(
+    df: pl.DataFrame,
+    *,
+    factor_col: str,
+    ret_col: str,
+    date_col: str,
+) -> pl.DataFrame:
+    ic_df = _daily_ic_df(df, factor_col, ret_col, date_col, method="pearson")
+    rank_ic_df = _daily_ic_df(df, factor_col, ret_col, date_col, method="spearman").rename(
+        {"ic": "rank_ic"}
+    )
+    return ic_df.join(rank_ic_df, on=date_col, how="inner").sort(date_col)
+
+
 def evaluate_factor(
     df: pl.DataFrame,
     *,
@@ -112,3 +162,94 @@ def evaluate_factor(
             "rank_ic_t_stat": [rank_s["t_stat"]],
         }
     )
+
+
+def evaluate_factor_by_period(
+    df: pl.DataFrame,
+    *,
+    period: Period = "year",
+    factor_col: str = "factor",
+    ret_col: str = "ret",
+    date_col: str = "trade_date",
+    factor_name: str | None = None,
+) -> pl.DataFrame:
+    """按年或月汇总因子 IC / rank IC 统计量。
+
+    period 为 ``year`` 时 period 列为年份（整数）；为 ``month`` 时为 ``YYYY-MM`` 字符串。
+    其余参数与 evaluate_factor 相同。
+    """
+    if period not in ("year", "month"):
+        raise ValueError("period 必须为 'year' 或 'month'")
+
+    required = (factor_col, ret_col, date_col, "stock_code")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"df 缺少必需列: {', '.join(missing)}")
+
+    name = resolve_factor_name(factor_name, factor_col)
+    daily = _daily_ic_panel(
+        df,
+        factor_col=factor_col,
+        ret_col=ret_col,
+        date_col=date_col,
+    )
+    if daily.is_empty():
+        return pl.DataFrame(
+            schema={
+                "period": pl.Int64 if period == "year" else pl.Utf8,
+                "factor_name": pl.Utf8,
+                "ic_mean": pl.Float64,
+                "ic_std": pl.Float64,
+                "ic_max": pl.Float64,
+                "ic_min": pl.Float64,
+                "ic_t_stat": pl.Float64,
+                "icir": pl.Float64,
+                "rank_ic_mean": pl.Float64,
+                "rank_ic_t_stat": pl.Float64,
+            }
+        )
+
+    daily = daily.with_columns(
+        _period_expr(date_col, period),
+        pl.lit(name).alias("factor_name"),
+    )
+    return (
+        daily.group_by("period", maintain_order=True)
+        .map_groups(_summarize_ic_period)
+        .sort("period")
+    )
+
+
+def plot_factor_ic(
+    df: pl.DataFrame,
+    *,
+    factor_col: str = "factor",
+    ret_col: str = "ret",
+    date_col: str = "trade_date",
+    factor_name: str | None = None,
+    figsize: tuple[float, float] = (14, 6.5),
+    show: bool = True,
+) -> pl.DataFrame:
+    """计算日度 IC 并绘制 IC 图，返回含 cum_ic 的日度序列。"""
+    from plotting import plot_ic
+
+    required = (factor_col, ret_col, date_col, "stock_code")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"df 缺少必需列: {', '.join(missing)}")
+
+    daily = _daily_ic_df(
+        df, factor_col, ret_col, date_col, method="pearson"
+    ).sort(date_col)
+    if daily.is_empty():
+        raise ValueError("无有效 IC 数据，无法绘图")
+
+    name = resolve_factor_name(factor_name, factor_col)
+    plot_ic(
+        daily,
+        date_col=date_col,
+        factor_name=name,
+        figsize=figsize,
+        show=show,
+    )
+    return daily.with_columns(pl.col("ic").cum_sum().alias("cum_ic"))

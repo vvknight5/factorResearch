@@ -31,6 +31,8 @@ df = df.with_columns(
 
 # 评价与回测
 metrics = evaluate_factor(df, factor_col="mom_20", ret_col="fut_ret", factor_name="20日动量")
+annual_ic = evaluate_factor_by_period(df, period="year", factor_col="mom_20", ret_col="fut_ret")
+daily_ic = plot_factor_ic(df, factor_col="mom_20", ret_col="fut_ret", factor_name="20日动量")
 perf = factor_group_backtest(df, n=5, factor_col="mom_20", ret_col="fut_ret", factor_name="20日动量")
 ```
 
@@ -76,6 +78,8 @@ perf = factor_group_backtest(df, n=5, factor_col="mom_20", ret_col="fut_ret", fa
 # DataFrame 封装
 from factorresearch import (
     evaluate_factor,
+    evaluate_factor_by_period,
+    plot_factor_ic,
     factor_group_backtest,
     neutralize_market_cap,
     standardize_cross_section,
@@ -91,7 +95,7 @@ from factorresearch.expr import (
 绘图函数从 `plotting` 子模块导入：
 
 ```python
-from plotting import hist_plot, plot_group_backtest, plot_quantile_bucket_curve
+from plotting import hist_plot, plot_group_backtest, plot_ic, plot_quantile_bucket_curve
 ```
 
 ---
@@ -187,6 +191,77 @@ evaluate_factor(
 | `icir` | 信息比率：\(\bar{ic} / s\) |
 | `rank_ic_mean` | rank IC 均值 |
 | `rank_ic_t_stat` | rank IC 均值 t 统计量 |
+
+---
+
+### `evaluate_factor_by_period`
+
+按 **年** 或 **月** 汇总 IC / rank IC 统计量（多行结果）。统计列与 `evaluate_factor` 相同，另含 `period` 列。
+
+```python
+evaluate_factor_by_period(
+    df: pl.DataFrame,
+    *,
+    period: Literal["year", "month"] = "year",
+    factor_col: str = "factor",
+    ret_col: str = "ret",
+    date_col: str = "trade_date",
+    factor_name: str | None = None,
+) -> pl.DataFrame
+```
+
+**输入必需列**：与 `evaluate_factor` 相同
+
+**参数说明**：
+
+| 参数 | 说明 |
+|------|------|
+| `period` | `"year"` 时 `period` 为年份整数；`"month"` 时为 `"YYYY-MM"` 字符串 |
+
+**返回列**（每个 period 一行）：`period`、`factor_name`，以及 `ic_mean`、`ic_std`、`ic_max`、`ic_min`、`ic_t_stat`、`icir`、`rank_ic_mean`、`rank_ic_t_stat`
+
+```python
+annual_ic = evaluate_factor_by_period(df, period="year", ret_col="fut_ret")
+monthly_ic = evaluate_factor_by_period(df, period="month", ret_col="fut_ret", factor_name="20日动量")
+```
+
+---
+
+### `plot_factor_ic`
+
+计算 **Pearson 日度 IC** 并绘制 IC 序列图，返回含累计 IC 的日度表。
+
+```python
+plot_factor_ic(
+    df: pl.DataFrame,
+    *,
+    factor_col: str = "factor",
+    ret_col: str = "ret",
+    date_col: str = "trade_date",
+    factor_name: str | None = None,
+    figsize: tuple[float, float] = (14, 6.5),
+    show: bool = True,
+) -> pl.DataFrame
+```
+
+**输入必需列**：与 `evaluate_factor` 相同
+
+**返回列**：`date_col`、`ic`、`cum_ic`（日 IC 累计和）
+
+**图形说明**（单图、双 y 轴）：
+
+| 元素 | 说明 |
+|------|------|
+| 横轴 | 交易日 |
+| 左 y 轴（`C0`） | 日 IC 柱形图；虚线标平均 IC；legend 显示 `mean IC` |
+| 右 y 轴（`C3`） | 日 IC 累计和折线；虚线标 y=0 |
+| 标题 | 显示 IC 序列 t 统计量（与 `ic_t_stat` 计算一致） |
+
+```python
+from factorresearch import plot_factor_ic
+
+daily_ic = plot_factor_ic(df, ret_col="fut_ret", factor_name="20日动量")
+```
 
 ---
 
@@ -295,6 +370,27 @@ plot_quantile_bucket_curve(
 
 ---
 
+### `plot_ic`
+
+基于已计算的日度 IC 序列绘图（底层接口，一般由 `plot_factor_ic` 调用）。
+
+```python
+plot_ic(
+    daily: pl.DataFrame,
+    *,
+    date_col: str = "trade_date",
+    ic_col: str = "ic",
+    factor_name: str | None = None,
+    figsize: tuple[float, float] = (14, 6.5),
+    show: bool = True,
+) -> None
+```
+
+- `daily`：含 `date_col`、`ic_col` 的日度 IC 表
+- 图形规格与 `plot_factor_ic` 相同
+
+---
+
 ## 典型工作流
 
 ```python
@@ -303,6 +399,8 @@ from factorresearch import (
     neutralize_market_cap,
     standardize_cross_section,
     evaluate_factor,
+    evaluate_factor_by_period,
+    plot_factor_ic,
     factor_group_backtest,
 )
 
@@ -321,8 +419,10 @@ panel = raw.with_columns(
 )
 
 # 2. 评价与回测
-ic_table = evaluate_factor(neutral, factor_col="raw_factor", ret_col="fut_ret")
-perf = factor_group_backtest(neutral, n=10, factor_col="raw_factor", ret_col="fut_ret", show=False)
+ic_table = evaluate_factor(panel, factor_col="raw_factor", ret_col="fut_ret")
+annual_ic = evaluate_factor_by_period(panel, period="year", factor_col="raw_factor", ret_col="fut_ret")
+daily_ic = plot_factor_ic(panel, factor_col="raw_factor", ret_col="fut_ret", show=False)
+perf = factor_group_backtest(panel, n=10, factor_col="raw_factor", ret_col="fut_ret", show=False)
 
 # 3. 多因子结果合并（均含 factor_name 列）
 # all_ic = pl.concat([ic_table, other_ic_table])

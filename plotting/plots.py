@@ -1,5 +1,12 @@
 import polars as pl
 
+_IC_AXIS_TICK_FONTSIZE = 16
+_IC_AXIS_LABEL_FONTSIZE = 17
+_IC_TITLE_FONTSIZE = 16
+_IC_LEGEND_FONTSIZE = 15
+_IC_FIGSIZE = (14, 6.5)
+_IC_BAR_COLOR = "C0"
+_IC_CUM_COLOR = "C3"
 _LABEL_FONTSIZE = 14
 _TICK_FONTSIZE = 12
 _TITLE_FONTSIZE = 14
@@ -129,3 +136,95 @@ def plot_group_backtest(
     fig.tight_layout()
     fig.subplots_adjust(wspace=0.45)
     plt.show()
+
+
+def plot_ic(
+    daily: pl.DataFrame,
+    *,
+    date_col: str = "trade_date",
+    ic_col: str = "ic",
+    factor_name: str | None = None,
+    figsize: tuple[float, float] = _IC_FIGSIZE,
+    show: bool = True,
+) -> None:
+    """绘制日度 IC 图：左轴柱形图 + 均值虚线，右轴累计 IC 折线 + 零轴虚线。"""
+    import math
+
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    missing = [c for c in (date_col, ic_col) if c not in daily.columns]
+    if missing:
+        raise ValueError(f"daily 缺少必需列: {', '.join(missing)}")
+    if daily.is_empty():
+        raise ValueError("daily 为空，无法绘图")
+
+    daily = daily.sort(date_col)
+    dates = daily[date_col].to_list()
+    ic = daily[ic_col].to_numpy()
+    cum_ic = np.cumsum(ic)
+    mean_ic = float(np.mean(ic))
+    n = ic.size
+    std = float(np.std(ic, ddof=1)) if n > 1 else float("nan")
+    if std == 0 or math.isnan(std):
+        ic_t_stat = float("nan")
+    else:
+        ic_t_stat = mean_ic / (std / math.sqrt(n))
+
+    fig, ax1 = plt.subplots(figsize=figsize)
+    x = mdates.date2num(dates)
+    if len(x) > 1:
+        bar_width = min(0.8, 0.8 * float(np.min(np.diff(x))))
+    else:
+        bar_width = 0.8
+
+    ax1.bar(x, ic, width=bar_width, color=_IC_BAR_COLOR, edgecolor="none")
+    mean_line = ax1.axhline(
+        mean_ic,
+        color=_IC_BAR_COLOR,
+        linestyle="--",
+        linewidth=2.5,
+    )
+    ax1.legend(
+        handles=[mean_line],
+        labels=[f"mean IC = {mean_ic:.4f}"],
+        loc="upper left",
+        fontsize=_IC_LEGEND_FONTSIZE,
+    )
+    ax1.set_ylabel("daily IC", color=_IC_BAR_COLOR, fontsize=_IC_AXIS_LABEL_FONTSIZE)
+    ax1.tick_params(
+        axis="y",
+        colors=_IC_BAR_COLOR,
+        labelcolor=_IC_BAR_COLOR,
+        labelsize=_IC_AXIS_TICK_FONTSIZE,
+    )
+
+    ax2 = ax1.twinx()
+    ax2.plot(x, cum_ic, color=_IC_CUM_COLOR, linestyle="-")
+    ax2.axhline(0, color=_IC_CUM_COLOR, linestyle="--")
+    ax2.set_ylabel("cumulative IC", color=_IC_CUM_COLOR, fontsize=_IC_AXIS_LABEL_FONTSIZE)
+    ax2.tick_params(
+        axis="y",
+        colors=_IC_CUM_COLOR,
+        labelcolor=_IC_CUM_COLOR,
+        labelsize=_IC_AXIS_TICK_FONTSIZE,
+    )
+
+    half_width = bar_width / 2
+    ax1.set_xlim(x[0] - half_width, x[-1] + half_width)
+    ax1.margins(x=0)
+
+    ax1.set_xlabel(date_col, fontsize=_IC_AXIS_LABEL_FONTSIZE)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax1.tick_params(axis="x", rotation=45, labelsize=_IC_AXIS_TICK_FONTSIZE)
+
+    prefix = f"{factor_name} — " if factor_name else ""
+    ax1.set_title(
+        f"{prefix}daily IC (IC t-stat = {ic_t_stat:.4f})",
+        fontsize=_IC_TITLE_FONTSIZE,
+    )
+
+    fig.tight_layout()
+    if show:
+        plt.show()

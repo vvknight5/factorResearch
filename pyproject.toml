@@ -9,6 +9,7 @@ description = "因子研究工具包"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "jupyter>=1.1.1",
     "matplotlib>=3.10.9",
     "polars>=1.40.1",
 ]
