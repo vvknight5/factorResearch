@@ -11,3 +11,7 @@ wheels/
 
 # data
 data/
+
+# test
+test.ipynb
+test.py
