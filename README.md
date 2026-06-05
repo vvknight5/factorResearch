@@ -1,6 +1,6 @@
 # factorresearch
 
-基于 [Polars](https://pola.rs/) 的 A 股因子研究工具包：预处理、IC 评价、分组回测与可视化。
+基于 [Polars](https://pola.rs/) 的 A 股因子研究工具包：预处理、正交化、IC 评价、因子相关、分组回测与可视化。
 
 ## 安装
 
@@ -65,7 +65,8 @@ perf = factor_group_backtest(df, n=5, factor_col="mom_20", ret_col="fut_ret", fa
 | 模块 | 处理方式 |
 |------|----------|
 | 预处理（中性化、标准化） | 仅用有限值（非 null、非 NaN、非 Inf）估计截面统计；无效行输出因子为 `null`；市值中性化要求因子与对数市值 **同时** 有效 |
-| 因子评价 | 计算 IC 前剔除因子、收益率为 `null` 的样本 |
+| 因子正交化 | 仅用 ``new_factor`` 与全部 ``base_factors`` 均有限的样本估计截面回归；无效行输出 ``null`` |
+| 因子评价 / 因子相关 | 计算 IC 或截面相关前剔除无效样本 |
 | 分组回测 | 分组前剔除因子、收益率为 `null` 的样本 |
 
 ---
@@ -79,23 +80,33 @@ perf = factor_group_backtest(df, n=5, factor_col="mom_20", ret_col="fut_ret", fa
 from factorresearch import (
     evaluate_factor,
     evaluate_factor_by_period,
-    plot_factor_ic,
+    factor_correlation_matrix,
     factor_group_backtest,
     neutralize_market_cap,
+    orthogonalize_factor,
+    plot_factor_correlation_matrix,
+    plot_factor_ic,
     standardize_cross_section,
 )
 
 # Polars 表达式（推荐在 with_columns 中使用）
 from factorresearch.expr import (
     neutralize_market_cap_expr,
+    orthogonalize_factor_expr,
     standardize_cross_section_expr,
 )
 ```
 
-绘图函数从 `plotting` 子模块导入：
+其他绘图函数从 `plotting` 子模块导入：
 
 ```python
 from plotting import hist_plot, plot_group_backtest, plot_ic, plot_quantile_bucket_curve
+```
+
+也可从包根导入相关矩阵热图：
+
+```python
+from factorresearch import plot_factor_correlation_matrix
 ```
 
 ---
@@ -156,6 +167,77 @@ from factorresearch import standardize_cross_section, neutralize_market_cap
 
 # 仅返回 stock_code、trade_date、处理后因子、factor_name
 out = standardize_cross_section(df, factor_col="mom_20", factor_name="20日动量")
+```
+
+---
+
+## 因子正交化
+
+将新因子对每个交易日截面正交化到基准因子张成的子空间：对 ``new_factor`` 关于 ``base_factors`` 做带截距的截面 OLS，输出回归残差。
+
+### `orthogonalize_factor`
+
+```python
+orthogonalize_factor(
+    df: pl.DataFrame,
+    *,
+    base_factors: list[str],
+    new_factor: str,
+    ret_col: str,
+    output_col: str | None = None,
+    date_col: str = "trade_date",
+    stock_col: str = "stock_code",
+) -> pl.DataFrame
+```
+
+**输入必需列**：`stock_code`、`date_col`、`ret_col`、`new_factor`、全部 `base_factors`
+
+**参数说明**：
+
+| 参数 | 说明 |
+|------|------|
+| `base_factors` | 基准因子列名列表，至少 1 列 |
+| `new_factor` | 待正交化因子，不得出现在 `base_factors` 中 |
+| `ret_col` | 收益率列（面板约定校验） |
+| `output_col` | 默认 `{new_factor}_orth`；与 `new_factor` 同名时替换原因子列 |
+
+**返回**：原表并追加（或替换）正交化因子列。
+
+```python
+from factorresearch import orthogonalize_factor
+
+panel = orthogonalize_factor(
+    df,
+    base_factors=["mom_20", "ep"],
+    new_factor="roe",
+    ret_col="fut_ret",
+    output_col="roe_orth",
+)
+```
+
+### `orthogonalize_factor_expr`
+
+| 场景 | 用法 |
+|------|------|
+| 单基准因子 | `orthogonalize_factor_expr("roe", "mom_20")` 返回 `pl.Expr`，用于 `with_columns` |
+| 多基准因子 | `df.pipe(orthogonalize_factor_expr, "roe", ["mom_20", "ep"], "fut_ret")` |
+
+```python
+from factorresearch.expr import orthogonalize_factor_expr
+
+# 单基准
+panel = df.with_columns(
+    orthogonalize_factor_expr("roe", "mom_20").alias("roe_orth"),
+)
+
+# 多基准
+panel = df.pipe(
+    orthogonalize_factor_expr,
+    "roe",
+    ["mom_20", "ep"],
+    "fut_ret",
+    output_col="roe_orth",
+)
 ```
 
 ---
@@ -261,6 +343,36 @@ plot_factor_ic(
 from factorresearch import plot_factor_ic
 
 daily_ic = plot_factor_ic(df, ret_col="fut_ret", factor_name="20日动量")
+```
+
+---
+
+### `factor_correlation_matrix`
+
+计算因子间**平均截面相关矩阵**：每个交易日分别计算因子对的截面相关，再对时间取平均。
+
+```python
+factor_correlation_matrix(
+    df: pl.DataFrame,
+    factor_cols: list[str],
+    *,
+    date_col: str = "trade_date",
+    method: Literal["pearson", "spearman"] = "pearson",
+) -> pl.DataFrame
+```
+
+**输入必需列**：`date_col`、全部 `factor_cols`
+
+**返回**：方阵，`factor_name` 为行标签，其余列为各因子名；对角线为 1，矩阵对称。
+
+```python
+from factorresearch import factor_correlation_matrix
+
+corr = factor_correlation_matrix(
+    df,
+    ["mom_20", "ep", "roe"],
+    method="spearman",
+)
 ```
 
 ---
@@ -391,41 +503,85 @@ plot_ic(
 
 ---
 
+### `plot_factor_correlation_matrix`
+
+绘制因子相关矩阵热图，输入通常为 `factor_correlation_matrix` 的返回值。
+
+```python
+plot_factor_correlation_matrix(
+    corr: pl.DataFrame,
+    *,
+    factor_name_col: str = "factor_name",
+    figsize: tuple[float, float] | None = None,
+    title: str | None = None,
+    annotate: bool | None = None,
+    cmap: str = "RdBu_r",
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    show: bool = True,
+) -> None
+```
+
+未指定 `figsize` 时，会根据因子数量与标签长度自动调整图像尺寸、字号与边距；因子数 > 15 时默认关闭格内数值标注。
+
+```python
+from factorresearch import factor_correlation_matrix, plot_factor_correlation_matrix
+
+corr = factor_correlation_matrix(df, ["mom_20", "ep", "roe"])
+plot_factor_correlation_matrix(corr, title="因子截面相关")
+```
+
+---
+
 ## 典型工作流
 
 ```python
 import polars as pl
 from factorresearch import (
-    neutralize_market_cap,
-    standardize_cross_section,
     evaluate_factor,
     evaluate_factor_by_period,
-    plot_factor_ic,
+    factor_correlation_matrix,
     factor_group_backtest,
+    orthogonalize_factor,
+    plot_factor_correlation_matrix,
+    plot_factor_ic,
+    standardize_cross_section,
+)
+from factorresearch.expr import (
+    neutralize_market_cap_expr,
+    orthogonalize_factor_expr,
+    standardize_cross_section_expr,
 )
 
 raw = pl.read_csv("factor_data.csv", schema_overrides={"trade_date": pl.Date})
 
 # 1. 预处理（链式表达式）
-from factorresearch.expr import (
-    neutralize_market_cap_expr,
-    standardize_cross_section_expr,
-)
-
 panel = raw.with_columns(
     standardize_cross_section_expr("raw_factor").alias("raw_factor"),
 ).with_columns(
     neutralize_market_cap_expr("raw_factor", "log_mv").alias("raw_factor"),
 )
 
-# 2. 评价与回测
-ic_table = evaluate_factor(panel, factor_col="raw_factor", ret_col="fut_ret")
-annual_ic = evaluate_factor_by_period(panel, period="year", factor_col="raw_factor", ret_col="fut_ret")
-daily_ic = plot_factor_ic(panel, factor_col="raw_factor", ret_col="fut_ret", show=False)
-perf = factor_group_backtest(panel, n=10, factor_col="raw_factor", ret_col="fut_ret", show=False)
+# 2. 新因子正交化到库内因子
+panel = panel.pipe(
+    orthogonalize_factor_expr,
+    "new_factor",
+    ["raw_factor"],
+    "fut_ret",
+    output_col="new_factor_orth",
+)
 
-# 3. 多因子结果合并（均含 factor_name 列）
-# all_ic = pl.concat([ic_table, other_ic_table])
+# 3. 评价与回测
+ic_table = evaluate_factor(panel, factor_col="new_factor_orth", ret_col="fut_ret")
+annual_ic = evaluate_factor_by_period(
+    panel, period="year", factor_col="new_factor_orth", ret_col="fut_ret",
+)
+daily_ic = plot_factor_ic(panel, factor_col="new_factor_orth", ret_col="fut_ret", show=False)
+perf = factor_group_backtest(panel, n=10, factor_col="new_factor_orth", ret_col="fut_ret", show=False)
+
+# 4. 多因子相关与可视化
+corr = factor_correlation_matrix(panel, ["raw_factor", "new_factor", "new_factor_orth"])
+plot_factor_correlation_matrix(corr, show=False)
 ```
 
 ---
@@ -435,12 +591,14 @@ perf = factor_group_backtest(panel, n=10, factor_col="raw_factor", ret_col="fut_
 ```
 factorresearch/          # 包入口（re-export）
 research/
-  expr.py                # Polars 表达式（with_columns）
+  expr.py                # Polars 表达式（with_columns / pipe）
   preprocessing.py       # DataFrame 封装
-  evaluation.py          # IC 评价
+  orthogonalization.py   # 因子正交化
+  evaluation.py          # IC 评价、因子相关
+  linearization.py       # 分段线性回归
   group_backtest.py      # 分组回测
 plotting/
-  plots.py               # 绘图
+  plots.py               # 绘图（含相关矩阵热图）
 ```
 
 ## 依赖

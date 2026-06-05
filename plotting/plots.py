@@ -228,3 +228,118 @@ def plot_ic(
     fig.tight_layout()
     if show:
         plt.show()
+
+
+def _correlation_heatmap_layout(
+    n: int,
+    max_label_len: int,
+) -> dict[str, float | tuple[float, float]]:
+    """按因子数量与标签长度估算热图布局参数。"""
+    cell = 0.95
+    label_pad = max_label_len * 0.08
+    side = max(5.0, cell * n + 2.0 + label_pad)
+    figsize = (side + 1.0, side)
+    tick_fontsize = max(7.0, min(12.0, 13.5 - 0.45 * n))
+    annotate_fontsize = max(7.0, min(12.0, 12.5 - 0.45 * n))
+    left = min(0.42, 0.10 + max_label_len * 0.014)
+    bottom = min(0.32, 0.12 + max_label_len * 0.010)
+    return {
+        "figsize": figsize,
+        "tick_fontsize": tick_fontsize,
+        "annotate_fontsize": annotate_fontsize,
+        "left": left,
+        "bottom": bottom,
+        "right": 0.88,
+    }
+
+
+def plot_factor_correlation_matrix(
+    corr: pl.DataFrame,
+    *,
+    factor_name_col: str = "factor_name",
+    figsize: tuple[float, float] | None = None,
+    title: str | None = None,
+    annotate: bool | None = None,
+    cmap: str = "RdBu_r",
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    show: bool = True,
+) -> None:
+    """绘制因子相关矩阵热图。
+
+    输入通常为 ``factor_correlation_matrix`` 的返回值：含 ``factor_name`` 行标签列
+    及各因子列构成的方阵。未指定 ``figsize`` 时，会根据因子数量与标签长度自动调整
+    图像尺寸、字号与边距。
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if factor_name_col not in corr.columns:
+        raise ValueError(f"corr 缺少必需列: {factor_name_col}")
+    if corr.is_empty():
+        raise ValueError("corr 为空，无法绘图")
+
+    labels = corr.get_column(factor_name_col).cast(pl.Utf8).to_list()
+    value_cols = [c for c in corr.columns if c != factor_name_col]
+    if not value_cols:
+        raise ValueError("corr 缺少因子相关列")
+
+    matrix = corr.select(value_cols).to_numpy()
+    if matrix.shape[0] != len(labels) or matrix.shape[1] != len(value_cols):
+        raise ValueError("corr 形状与 factor_name 行数不一致")
+
+    n_rows, n_cols = matrix.shape
+    n = max(n_rows, n_cols)
+    max_label_len = max(len(str(label)) for label in [*labels, *value_cols])
+    layout = _correlation_heatmap_layout(n, max_label_len)
+    if figsize is None:
+        figsize = layout["figsize"]  # type: ignore[assignment]
+    if annotate is None:
+        annotate = n <= 15
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal")
+
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_xticklabels(value_cols, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("factor")
+    ax.set_ylabel("factor")
+    ax.set_title(title or "factor correlation matrix")
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("correlation")
+    cbar.ax.tick_params(labelsize=layout["tick_fontsize"])
+
+    if annotate:
+        for i in range(n_rows):
+            for j in range(n_cols):
+                val = matrix[i, j]
+                if np.isfinite(val):
+                    text = f"{val:.2f}"
+                else:
+                    text = "nan"
+                color = "white" if np.isfinite(val) and abs(val) > 0.5 else "black"
+                ax.text(
+                    j,
+                    i,
+                    text,
+                    ha="center",
+                    va="center",
+                    color=color,
+                    fontsize=layout["annotate_fontsize"],
+                )
+
+    ax.tick_params(axis="both", labelsize=layout["tick_fontsize"])
+    ax.xaxis.label.set_fontsize(_LABEL_FONTSIZE)
+    ax.yaxis.label.set_fontsize(_LABEL_FONTSIZE)
+    ax.title.set_fontsize(_TITLE_FONTSIZE)
+
+    fig.subplots_adjust(
+        left=layout["left"],
+        bottom=layout["bottom"],
+        right=layout["right"],
+    )
+    if show:
+        plt.show()

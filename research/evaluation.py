@@ -3,9 +3,11 @@ from typing import Literal
 
 import polars as pl
 
+from research.expr import _is_finite
 from research.utils import resolve_factor_name
 
 Period = Literal["year", "month"]
+CorrMethod = Literal["pearson", "spearman"]
 _REQUIRED_COLS = ("factor", "ret", "trade_date", "stock_code")
 
 
@@ -253,3 +255,80 @@ def plot_factor_ic(
         show=show,
     )
     return daily.with_columns(pl.col("ic").cum_sum().alias("cum_ic"))
+
+
+def _daily_factor_correlation(
+    df: pl.DataFrame,
+    factor_a: str,
+    factor_b: str,
+    date_col: str,
+    method: CorrMethod,
+) -> pl.Series:
+    valid = _is_finite(factor_a) & _is_finite(factor_b)
+    return (
+        df.filter(valid)
+        .group_by(date_col)
+        .agg(pl.corr(factor_a, factor_b, method=method).alias("corr"))
+        .filter(pl.col("corr").is_finite())
+        .get_column("corr")
+    )
+
+
+def factor_correlation_matrix(
+    df: pl.DataFrame,
+    factor_cols: list[str],
+    *,
+    date_col: str = "trade_date",
+    method: CorrMethod = "pearson",
+) -> pl.DataFrame:
+    """计算因子间平均截面相关矩阵。
+
+    对每个交易日分别计算因子对的截面相关，再对时间取平均。
+    对角线为 1；矩阵对称。无效样本（null / NaN / Inf）不参与当日估计。
+
+    参数
+    ----
+    factor_cols:
+        因子列名列表，至少 1 列。
+    date_col:
+        日期列名（默认 ``trade_date``）。
+    method:
+        ``pearson`` 或 ``spearman``。
+    """
+    if not factor_cols:
+        raise ValueError("factor_cols 至少包含 1 列")
+    if method not in ("pearson", "spearman"):
+        raise ValueError("method 必须为 'pearson' 或 'spearman'")
+
+    missing = [c for c in (date_col, *factor_cols) if c not in df.columns]
+    if missing:
+        raise ValueError(f"df 缺少必需列: {', '.join(missing)}")
+
+    n = len(factor_cols)
+    values: list[list[float | None]] = [[None] * n for _ in range(n)]
+
+    for i, col_i in enumerate(factor_cols):
+        values[i][i] = 1.0
+        for j in range(i + 1, n):
+            col_j = factor_cols[j]
+            corr = _daily_factor_correlation(
+                df, col_i, col_j, date_col, method
+            )
+            if corr.len() == 0:
+                mean_corr = float("nan")
+            else:
+                mean_corr = corr.mean()
+                if mean_corr is None or (
+                    isinstance(mean_corr, float) and math.isnan(mean_corr)
+                ):
+                    mean_corr = float("nan")
+            values[i][j] = mean_corr
+            values[j][i] = mean_corr
+
+    data: dict[str, pl.Series] = {
+        "factor_name": pl.Series(factor_cols, dtype=pl.Utf8),
+    }
+    for j, col_j in enumerate(factor_cols):
+        data[col_j] = pl.Series([row[j] for row in values], dtype=pl.Float64)
+
+    return pl.DataFrame(data)
