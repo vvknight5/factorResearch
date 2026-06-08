@@ -192,7 +192,9 @@ def piecewise_linear_regression(
     """分段线性回归线性化：在估计窗口内拟合因子分位与超额收益映射，输出转换因子。
 
     对交易日 ``t``，映射仅使用 ``[t - decay - lookback_days + 1, t - decay]`` 的数据估计，
-    并应用于 ``t`` 日截面因子。返回输入 ``df`` 并追加转换后的因子列。
+    并应用于 ``t`` 日截面因子。估计阶段要求因子与收益同时有效；应用阶段仅要求 ``t`` 日
+    因子有效（``t`` 日收益可为空，例如样本末日尚无 ``fut_ret``）。返回输入 ``df`` 并追加
+    转换后的因子列。
 
     参数
     ----
@@ -250,7 +252,8 @@ def piecewise_linear_regression(
         .alias("_excess"),
     )
 
-    ready = panel.filter(
+    # 估计面板：因子与收益均有效，用于拟合分段线性映射
+    est_ready = panel.filter(
         _is_finite("_factor"),
         _is_finite("_excess"),
     ).with_columns(
@@ -258,14 +261,19 @@ def piecewise_linear_regression(
         factor_percentile_expr("_factor", date_col=date_col).alias("_pct"),
     )
 
-    if ready.is_empty():
+    # 应用面板：仅需因子有效，用于将映射代入当日截面（不要求当日 fut_ret）
+    apply_ready = panel.filter(_is_finite("_factor")).with_columns(
+        factor_percentile_expr("_factor", date_col=date_col).alias("_pct"),
+    )
+
+    if est_ready.is_empty() or apply_ready.is_empty():
         return _attach_output_column(
             df, None, out_col=out_col, factor_col=factor_col,
             date_col=date_col, stock_col=stock_col,
         )
 
     daily_group_excess = (
-        ready.group_by(date_col, "_group")
+        est_ready.group_by(date_col, "_group")
         .agg(
             pl.col("_excess").mean().alias("_group_excess"),
             pl.len().alias("_group_size"),
@@ -274,7 +282,7 @@ def piecewise_linear_regression(
     )
 
     est_group_x = (
-        ready.group_by(date_col, "_group")
+        est_ready.group_by(date_col, "_group")
         .agg(pl.col("_pct").median().alias("_group_x"))
         .filter(pl.col("_group").is_not_null())
     )
@@ -293,19 +301,21 @@ def piecewise_linear_regression(
     )
 
     pct_by_date: dict[object, tuple[list, list]] = {}
-    for date_val, sub in ready.group_by(date_col, maintain_order=True):
+    for date_val, sub in apply_ready.group_by(date_col, maintain_order=True):
         d = date_val[0]
         pct_by_date[d] = (
             sub.get_column(stock_col).to_list(),
             sub.get_column("_pct").to_list(),
         )
 
-    dates = sorted(pct_by_date)
+    dates = sorted(df.get_column(date_col).unique().to_list())
     transform_parts: list[pl.DataFrame] = []
 
     min_idx = decay + lookback_days - 1
     for t_idx in range(min_idx, len(dates)):
         t_date = dates[t_idx]
+        if t_date not in pct_by_date:
+            continue
         est_idx = t_idx - decay
         est_date = dates[est_idx]
         window_dates = dates[est_idx - lookback_days + 1 : est_idx + 1]
